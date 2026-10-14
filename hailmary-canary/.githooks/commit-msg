@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MSG_FILE="$1"
+PATTERN='^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\([a-z0-9._-]+\))?!?: .+'
+FIRST_LINE=$(head -n1 "$MSG_FILE")
+
+# Git generates these itself, so they never follow the convention
+if [[ "$FIRST_LINE" =~ ^(Merge|Revert|fixup!|squash!) ]]; then
+  exit 0
+fi
+
+if ! [[ "$FIRST_LINE" =~ $PATTERN ]]; then
+  cat >&2 <<'MSG'
+Commit message must follow Conventional Commits:
+
+  <type>[optional scope]: <description>
+
+Types: feat, fix, docs, style, refactor, perf, test, chore, ci, build, revert
+Example: feat(gateway): add header canary rule
+MSG
+  exit 1
+fi

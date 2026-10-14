@@ -1,0 +1,81 @@
+# Gateway API ranks rules with more header matches higher, so the header canaries beat the default rule regardless of order.
+# The default rule stays at index 3 because the Makefile patches it by index (DEFAULT_RULE).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: llm, namespace: llm-test}
+spec:
+  parentRefs: [{name: eg}]
+  rules:
+
+  # Header canary for one specific test configuration
+  - matches:
+    - path: {type: PathPrefix, value: /v1}
+      headers:
+      - {name: x-llm-canary, value: canary-model-test-configuration-92}
+    filters:
+    - type: ResponseHeaderModifier
+      responseHeaderModifier:
+        set: [{name: x-served-by, value: llm-new-config-92}]
+    backendRefs:
+    - {name: llm-new-config-92, port: 8000}
+
+  # Header canary for the whole new cluster
+  - matches:
+    - path: {type: PathPrefix, value: /v1}
+      headers:
+      - {name: x-llm-canary, value: "true"}
+    filters:
+    - type: ResponseHeaderModifier
+      responseHeaderModifier:
+        set: [{name: x-served-by, value: llm-new}]
+    backendRefs:
+    - {name: llm-new, port: 8000}
+
+  # Failure-injecting backend, to see which errors retries do and do not mask
+  - matches:
+    - path: {type: PathPrefix, value: /v1}
+      headers:
+      - {name: x-llm-canary, value: flaky}
+    filters:
+    - type: ResponseHeaderModifier
+      responseHeaderModifier:
+        set: [{name: x-served-by, value: llm-flaky}]
+    backendRefs:
+    - {name: llm-flaky, port: 8000}
+
+  # Default: weighted ramp, driven by `make weight NEW=<percent>` or `make ramp`
+  - matches:
+    - path: {type: PathPrefix, value: /v1}
+    backendRefs:
+    - name: llm-stable
+      port: 8000
+      weight: 100
+      filters:
+      - type: ResponseHeaderModifier
+        responseHeaderModifier:
+          set: [{name: x-served-by, value: llm-stable}]
+    - name: llm-new
+      port: 8000
+      weight: 0
+      filters:
+      - type: ResponseHeaderModifier
+        responseHeaderModifier:
+          set: [{name: x-served-by, value: llm-new}]
+---
+# Retries only on failures before any response bytes exist, so a half-streamed answer is never replayed.
+# A 429 from a provider is deliberately not retried here; it reaches the client unmasked.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata: {name: llm-policy, namespace: llm-test}
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: llm
+  timeout:
+    http:
+      requestTimeout: 300s
+  retry:
+    numRetries: 2
+    retryOn:
+      triggers: ["connect-failure", "refused-stream"]

@@ -1,0 +1,23 @@
+# Routing is by the model name in the request body: the AI Gateway extracts it into the x-ai-eg-model header.
+# The weighted rule is index 0 because the Makefile patches it by index (AI_RULE).
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata: {name: ai-llm, namespace: llm-test}
+spec:
+  parentRefs:
+  - {name: eg-ai, kind: Gateway, group: gateway.networking.k8s.io}
+  rules:
+  - matches:
+    - headers:
+      - {type: Exact, name: x-ai-eg-model, value: test-model}
+    backendRefs:
+    - {name: ai-llm-stable, weight: 100}
+    - {name: ai-llm-new, weight: 0}
+
+  # Two header matches outrank the single model match above
+  - matches:
+    - headers:
+      - {type: Exact, name: x-ai-eg-model, value: test-model}
+      - {type: Exact, name: x-llm-canary, value: "true"}
+    backendRefs:
+    - {name: ai-llm-new}

@@ -1,0 +1,62 @@
+# ClusterIP because kind has no load balancer; a LoadBalancer Service would stay pending and the Gateway never Programmed
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata: {name: eg-proxy, namespace: envoy-gateway-system}
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService: {type: ClusterIP}
+      envoyDeployment:
+        replicas: 1
+        container:
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: {name: eg}
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: eg-proxy
+    namespace: envoy-gateway-system
+---
+# Plain Gateway API gateway: HTTPRoute, weights, mirroring, retries
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: eg, namespace: llm-test}
+spec:
+  gatewayClassName: eg
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces: {from: Same}
+---
+# AI-aware gateway: AIGatewayRoute, model-name routing, token metrics
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: eg-ai, namespace: llm-test}
+spec:
+  gatewayClassName: eg
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces: {from: Same}
+---
+# Envoy's default 32 KiB buffer limit is too small for LLM request and response bodies
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata: {name: buffer-limit, namespace: llm-test}
+spec:
+  targetRefs:
+  - {group: gateway.networking.k8s.io, kind: Gateway, name: eg}
+  - {group: gateway.networking.k8s.io, kind: Gateway, name: eg-ai}
+  connection:
+    bufferLimit: 50Mi

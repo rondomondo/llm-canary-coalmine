@@ -1,0 +1,24 @@
+# kind does not expose these control-plane endpoints, so their targets would sit permanently down
+kubeEtcd: {enabled: false}
+kubeScheduler: {enabled: false}
+kubeControllerManager: {enabled: false}
+kubeProxy: {enabled: false}
+
+alertmanager: {enabled: false}
+
+# node-exporter needs host mount propagation that the Colima VM and kind nodes do not provide
+nodeExporter: {enabled: false}
+
+grafana:
+  adminPassword: admin
+
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 5s
+    retention: 6h
+    # the default selectors only match objects labelled with the Helm release, which would ignore our monitors
+    podMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+    resources:
+      requests: {cpu: 200m, memory: 512Mi}

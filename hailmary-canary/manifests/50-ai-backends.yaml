@@ -1,0 +1,29 @@
+# Each AIServiceBackend wraps an Envoy Gateway Backend that points at the in-cluster Service.
+# The "OpenAI" schema tells the AI Gateway these upstreams speak the OpenAI API, so it can parse usage tokens.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata: {name: be-llm-stable, namespace: llm-test}
+spec:
+  endpoints:
+  - fqdn: {hostname: llm-stable.llm-test.svc.cluster.local, port: 8000}
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIServiceBackend
+metadata: {name: ai-llm-stable, namespace: llm-test}
+spec:
+  schema: {name: OpenAI}
+  backendRef: {group: gateway.envoyproxy.io, kind: Backend, name: be-llm-stable}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata: {name: be-llm-new, namespace: llm-test}
+spec:
+  endpoints:
+  - fqdn: {hostname: llm-new.llm-test.svc.cluster.local, port: 8000}
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIServiceBackend
+metadata: {name: ai-llm-new, namespace: llm-test}
+spec:
+  schema: {name: OpenAI}
+  backendRef: {group: gateway.envoyproxy.io, kind: Backend, name: be-llm-new}
