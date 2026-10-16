@@ -80,7 +80,7 @@ You can skim this and come back as terms appear.
 | **TTFT** | Time to first token. For streamed LLM output, how long until the first byte of the answer arrives. Often what users perceive as "latency". |
 | **Gateway API** | The Kubernetes standard (`Gateway`, `HTTPRoute`, `GatewayClass`) for describing traffic routing. Replaces Ingress. |
 | **Envoy Gateway** | An implementation of Gateway API that runs Envoy proxies and configures them from those resources. |
-| **Agent Router (Envoy AI Gateway)** | An extension to Envoy Gateway that understands LLM APIs: it reads the `model` field from the JSON body and can route on it. Adds `AIGatewayRoute` and `AIServiceBackend`. |
+| **Agent Router (Envoy AI Gateway)** | An extension to Envoy Gateway that understands LLM APIs: it reads the `model` field from the JSON body and can route on it. Adds `AIGatewayRoute` and `AIServiceBackend`. Same project under two names: it was renamed from Envoy AI Gateway to Agent Router, but the charts, CRD group and many docs still use the old name (see [Versions](#versions)). |
 | **kind / Colima** | kind runs a Kubernetes cluster as Docker containers. Colima provides the Linux VM and Docker daemon on macOS that kind needs. |
 | **Inference simulator** | `llm-d-inference-sim`: a fake OpenAI-compatible server with configurable latency, streaming, metrics and failures. |
 | **vllm-metal** | vLLM running on Apple Silicon through MLX/Metal. A real (small) model, but it can only run on the Mac host, not inside the Linux VM. |
@@ -580,16 +580,13 @@ Questions worth being able to answer when you are done:
 | --- | --- | --- |
 | Envoy Gateway | v1.9.2 | Agent Router 1.2 prerequisites page |
 | Agent Router charts (`ai-gateway-crds-helm`, `ai-gateway-helm`) | v1.2.0 | Agent Router 1.2 installation page |
-| Simulator image | v0.9.2 | tag used by a third-party lab and listed in llm-d release notes; newer exist |
-| kube-prometheus-stack | unpinned | pin once it works |
+| Simulator image | v0.9.2 | tag used by a third-party lab and listed in llm-d release notes; newer exist, not yet checked against this lab |
+| kube-prometheus-stack | unpinned | pin once it works (`--version` on the `helm upgrade` line in the `monitoring` target) so a chart update cannot change your dashboards or CRDs under you |
 
 Agent Router is the new name of Envoy AI Gateway (renamed 10 September 2026, now in the Agentic AI Foundation). The Helm
 charts still live under `envoyproxy` on Docker Hub and the CRD group is still `aigateway.envoyproxy.io`. It needs
 Kubernetes 1.32 or newer and a clean Envoy Gateway installed with its values file, which is vendored in
 `helm/envoy-gateway-values.yaml`. That file routes every Gateway through the AI controller, including the plain one.
-
-Pin kube-prometheus-stack once you have a working install (`--version` on the `helm upgrade` line in the `monitoring`
-target) so a chart update cannot change your dashboards or CRDs under you.
 
 ## Verified and not verified
 
@@ -683,7 +680,22 @@ make vm-stop    # stop Colima
 `make down` followed by `make up` is the cleanest "reset everything" and takes a few minutes. `make reset` is the quick
 version that only restores the routes.
 
-Colima holds images and a disk: `colima delete` reclaims the space entirely if you are finished with the lab.
+### Undoing the setup
+
+Setup records what it created in `.state/`, so the undo targets only remove things this lab added and leave anything that
+was already on your machine (Docker, uv, a running Colima, your git hooks path) alone.
+
+| Target | Undoes |
+| --- | --- |
+| `make teardown` | `make up` inside the cluster (manifests, monitoring, AI gateway, Envoy Gateway and their CRDs), keeping the kind cluster. Also available piecemeal: `apply-down`, `monitoring-down`, `ai-down`, `eg-down`. |
+| `make vm-delete` | `make vm`: restores the previous Docker context, then stops Colima if we started it or deletes it if we created it. Refuses if other kind clusters exist. |
+| `make host-uninstall` | `make host-install`: removes the vllm-metal venv. Refuses while `vllm serve` is running. |
+| `make uninstall` | `make install`: restores `core.hooksPath` and removes the project `.venv`. |
+| `make tools-remove` | `make tools`: brew-uninstalls only formulae it installed, and skips any that other formulae need. |
+| `make model-rm MODEL=<name>` | Deletes the cached HuggingFace weights for one model. Opt-in because the cache is shared; `nuke` does not run it. |
+| `make nuke` | Everything above except `model-rm`, after a confirmation prompt (`YES=1` skips it). |
+
+Delete `.state/` and these targets lose track of what is ours, so leave it alone until you are done.
 
 ## Further reading
 

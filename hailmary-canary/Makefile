@@ -50,8 +50,20 @@ VENV          ?= $(HOME)/.venv-vllm-metal
 INSTALL_ARGS  ?= --stable
 HOST_IP       ?= $(shell colima ssh -- getent hosts host.lima.internal 2>/dev/null | awk '{print $$1}')
 
+# -- Teardown bookkeeping -------------------------------------
+# Setup records here what it created, so teardown only undoes our own changes
+# and leaves anything that was already on the machine (docker, uv, Colima...) alone.
+STATE      ?= .state
+BREW_TOOLS := colima docker kind kubectl helm uv
+KCTX        = kind-$(CLUSTER)
+YES        ?=
+
 # -- Helpers --------------------------------------------------
-svc = $$(kubectl -n $(EG_NS) get svc -l gateway.envoyproxy.io/owning-gateway-name=$(1),gateway.envoyproxy.io/owning-gateway-namespace=$(NS) -o name)
+K = kubectl --context $(KCTX)
+in_cluster = kind get clusters 2>/dev/null | grep -qx '$(CLUSTER)'
+helm_rm = if helm --kube-context $(KCTX) status $(1) -n $(2) >/dev/null 2>&1; then helm --kube-context $(KCTX) uninstall $(1) -n $(2) --wait; else echo "$(1) not installed, skipping"; fi
+rm_crds = crds=$$($(K) get crd -o name | grep -E '$(1)'); if [ -n "$$crds" ]; then $(K) delete $$crds --ignore-not-found; fi
+svc =$$(kubectl -n $(EG_NS) get svc -l gateway.envoyproxy.io/owning-gateway-name=$(1),gateway.envoyproxy.io/owning-gateway-namespace=$(NS) -o name)
 payload = {"model":"$(1)","messages":[{"role":"user","content":"hi"}],"max_tokens":8}
 probe = printf '%-50s ' '$(1)'; curl -s -o /dev/null -D - -H 'Content-Type: application/json' -H '$(2)' -d '$(call payload,$(3))' $(4) | tr -d '\r' | awk 'NR==1{printf "%s  ", $$2} tolower($$1)=="x-served-by:"{printf "%s ", $$2} tolower($$1)=="x-inference-pod:"{printf "(%s)", $$2}'; echo
 weight_patch = kubectl -n $(NS) patch $(1) $(2) --type=json -p '[{"op":"replace","path":"/spec/rules/$(3)/backendRefs/0/weight","value":$(shell expr 100 - $(NEW))},{"op":"replace","path":"/spec/rules/$(3)/backendRefs/1/weight","value":$(NEW)}]'
@@ -71,17 +83,30 @@ help: ## Show this help message
 
 .PHONY: install
 install: ## Enable git hooks and sync Python deps
+	@mkdir -p $(STATE)
+	@test -f $(STATE)/hooks-path || git config --local --get core.hooksPath > $(STATE)/hooks-path || true
 	git config core.hooksPath .githooks
 	chmod +x .githooks/commit-msg
 	uv sync --extra dev
 
 .PHONY: tools
-tools: ## Install host tooling with Homebrew
-	brew install colima docker kind kubectl helm uv
+tools: ## Install missing host tooling with Homebrew (existing installs are left alone)
+	@mkdir -p $(STATE)
+	@for t in $(BREW_TOOLS); do \
+	  if command -v $$t >/dev/null 2>&1; then echo "$$t already installed, leaving it alone"; \
+	  else brew install $$t && { grep -qx $$t $(STATE)/brew-installed 2>/dev/null || echo $$t >> $(STATE)/brew-installed; }; fi; \
+	done
 
 .PHONY: vm
-vm: ## Start the Colima VM that kind runs in
-	colima start --cpu $(CPUS) --memory $(MEM_GB) --disk $(DISK_GB) --vm-type vz
+vm: ## Start the Colima VM that kind runs in (an already-running VM is left as is)
+	@mkdir -p $(STATE)
+	@test -f $(STATE)/docker-context || docker context show > $(STATE)/docker-context 2>/dev/null || true
+	@if colima status >/dev/null 2>&1; then echo "Colima already running, not touching it"; \
+	else \
+	  colima list 2>/dev/null | awk 'NR>1 && $$1=="default"' | grep -q . || touch $(STATE)/colima-created; \
+	  touch $(STATE)/colima-started; \
+	  colima start --cpu $(CPUS) --memory $(MEM_GB) --disk $(DISK_GB) --vm-type vz; \
+	fi
 	docker context use colima
 
 .PHONY: vm-stop
@@ -109,7 +134,9 @@ ai: ## Install the AI Gateway (Agent Router) CRDs and controller
 
 .PHONY: monitoring
 monitoring: ## Install Prometheus and Grafana
-	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+	@mkdir -p $(STATE)
+	@helm repo list 2>/dev/null | awk 'NR>1{print $$1}' | grep -qx prometheus-community \
+	  || { helm repo add prometheus-community https://prometheus-community.github.io/helm-charts && touch $(STATE)/helm-repo-prometheus; }
 	helm repo update prometheus-community
 	helm upgrade --install kps prometheus-community/kube-prometheus-stack -n $(MON_NS) --create-namespace \
 	  -f helm/kube-prometheus-stack-values.yaml --wait --timeout 10m
@@ -238,6 +265,90 @@ real-as-new: ## Plain gateway: make vllm-metal the llm-new side of the weighted 
 real-down: ## Remove the vllm-metal routes from the cluster
 	@$(need_host_ip)
 	$(host_manifest) | kubectl delete -f - --ignore-not-found
+
+##@ Teardown
+
+.PHONY: apply-down
+apply-down: ## Undo `apply`: remove gateways, backends, routes, monitors and dashboard
+	@if $(in_cluster); then $(K) delete -f manifests/ --ignore-not-found; else echo "no $(CLUSTER) cluster, skipping"; fi
+
+.PHONY: monitoring-down
+monitoring-down: ## Undo `monitoring`: remove Prometheus and Grafana (and the helm repo only if we added it)
+	@if $(in_cluster); then \
+	  $(call helm_rm,kps,$(MON_NS)); \
+	  $(call rm_crds,monitoring\.coreos\.com); \
+	  $(K) delete ns $(MON_NS) --ignore-not-found; \
+	else echo "no $(CLUSTER) cluster, skipping"; fi
+	@if [ -f $(STATE)/helm-repo-prometheus ]; then helm repo remove prometheus-community && rm -f $(STATE)/helm-repo-prometheus; \
+	else echo "helm repo prometheus-community not added by us, keeping it"; fi
+
+.PHONY: ai-down
+ai-down: ## Undo `ai`: remove the AI Gateway controller and CRDs
+	@if $(in_cluster); then \
+	  $(call helm_rm,aieg,$(AIGW_NS)); \
+	  $(call helm_rm,aieg-crd,$(AIGW_NS)); \
+	  $(call rm_crds,aigateway\.envoyproxy\.io); \
+	  $(K) delete ns $(AIGW_NS) --ignore-not-found; \
+	else echo "no $(CLUSTER) cluster, skipping"; fi
+
+.PHONY: eg-down
+eg-down: ## Undo `eg`: remove Envoy Gateway and its CRDs
+	@if $(in_cluster); then \
+	  $(call helm_rm,eg,$(EG_NS)); \
+	  $(call rm_crds,envoyproxy\.io|gateway\.networking\.(x-)?k8s\.io); \
+	  $(K) delete ns $(EG_NS) --ignore-not-found; \
+	else echo "no $(CLUSTER) cluster, skipping"; fi
+
+.PHONY: teardown
+teardown: apply-down monitoring-down ai-down eg-down ## Undo `up` inside the cluster, keeping the kind cluster itself
+
+.PHONY: vm-delete
+vm-delete: ## Undo `vm`: restore the Docker context; stop/delete Colima only if we started/created it
+	@if kind get clusters 2>/dev/null | grep -qvx '$(CLUSTER)'; then \
+	  printf "$(RED)other kind clusters exist, leaving Colima alone$(RESET)\n" >&2; exit 1; fi
+	@prev=$$(cat $(STATE)/docker-context 2>/dev/null); \
+	if [ "$$(docker context show 2>/dev/null)" = colima ] && [ -n "$$prev" ] && [ "$$prev" != colima ]; then docker context use "$$prev"; fi
+	@if [ -f $(STATE)/colima-created ]; then colima delete --force && rm -f $(STATE)/colima-created $(STATE)/colima-started; \
+	elif [ -f $(STATE)/colima-started ]; then colima stop && rm -f $(STATE)/colima-started; \
+	else echo "Colima was not started by us, leaving it alone"; fi
+	@rm -f $(STATE)/docker-context
+
+.PHONY: host-uninstall
+host-uninstall: ## Undo host-install: remove the vllm-metal venv (never uv, never the model cache)
+	@if pgrep -f '[v]llm serve' >/dev/null; then printf "$(RED)vllm serve is running, stop it first$(RESET)\n" >&2; exit 1; fi
+	@if [ -f "$(VENV)/pyvenv.cfg" ]; then rm -rf "$(VENV)" && echo "removed $(VENV)"; else echo "$(VENV) is not a venv, leaving it"; fi
+
+.PHONY: model-rm
+model-rm: ## Delete the cached HuggingFace weights for MODEL (opt-in, the cache is shared; not in nuke)
+	@test -n "$(MODEL)"
+	rm -rf "$${HF_HOME:-$(HOME)/.cache/huggingface}/hub/models--$(subst /,--,$(MODEL))"
+
+.PHONY: uninstall
+uninstall: ## Undo `install`: restore git hooks path and remove the project .venv (uv itself stays)
+	@cur=$$(git config --local --get core.hooksPath || true); \
+	if [ "$$cur" = .githooks ]; then \
+	  prev=$$(cat $(STATE)/hooks-path 2>/dev/null); \
+	  if [ -n "$$prev" ]; then git config --local core.hooksPath "$$prev"; else git config --local --unset core.hooksPath; fi; \
+	  rm -f $(STATE)/hooks-path; \
+	else echo "core.hooksPath is '$$cur', not ours, leaving it"; fi
+	@if [ -f .venv/pyvenv.cfg ]; then rm -rf .venv && echo "removed .venv"; fi
+
+.PHONY: tools-remove
+tools-remove: ## Undo `tools`: brew-uninstall only what it installed (skips anything other formulae need)
+	@test -s $(STATE)/brew-installed || { echo "nothing recorded as installed by make tools"; exit 0; }
+	@for t in $$(cat $(STATE)/brew-installed); do \
+	  deps=$$(brew uses --installed $$t 2>/dev/null | grep -vxFf $(STATE)/brew-installed | tr '\n' ' '); \
+	  if [ -n "$$deps" ]; then echo "keeping $$t, needed by: $$deps"; continue; fi; \
+	  brew uninstall --ignore-dependencies $$t && sed -i '' "/^$$t$$/d" $(STATE)/brew-installed; \
+	done
+
+.PHONY: confirm
+confirm:
+	@test "$(YES)" = 1 || { printf "$(YELLOW)Tear down cluster, Colima (if ours), host venv, .venv and brew tools we installed? [y/N] $(RESET)"; read -r a; test "$$a" = y; }
+
+.PHONY: nuke
+nuke: confirm down vm-delete host-uninstall uninstall tools-remove ## Undo all setup (asks first, YES=1 skips); pre-existing tools are kept
+	@rmdir $(STATE) 2>/dev/null || true
 
 ##@ Test
 
