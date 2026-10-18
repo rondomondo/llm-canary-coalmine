@@ -11,6 +11,9 @@ YELLOW := \033[33m
 RESET  := \033[0m
 
 # -- VM & Cluster Config --------------------------------------
+# Scoped to this Makefile's commands (docker, kind) so the user's own Docker context is never switched.
+# Hard-set rather than ?= so a DOCKER_CONTEXT exported in the shell cannot silently send kind to another daemon.
+export DOCKER_CONTEXT := colima
 CLUSTER ?= llm-lab
 CPUS    ?= 8
 MEM_GB  ?= 24
@@ -100,14 +103,12 @@ tools: ## Install missing host tooling with Homebrew (existing installs are left
 .PHONY: vm
 vm: ## Start the Colima VM that kind runs in (an already-running VM is left as is)
 	@mkdir -p $(STATE)
-	@test -f $(STATE)/docker-context || docker context show > $(STATE)/docker-context 2>/dev/null || true
 	@if colima status >/dev/null 2>&1; then echo "Colima already running, not touching it"; \
 	else \
 	  colima list 2>/dev/null | awk 'NR>1 && $$1=="default"' | grep -q . || touch $(STATE)/colima-created; \
 	  touch $(STATE)/colima-started; \
 	  colima start --cpu $(CPUS) --memory $(MEM_GB) --disk $(DISK_GB) --vm-type vz; \
 	fi
-	docker context use colima
 
 .PHONY: vm-stop
 vm-stop: ## Stop the Colima VM
@@ -303,15 +304,12 @@ eg-down: ## Undo `eg`: remove Envoy Gateway and its CRDs
 teardown: apply-down monitoring-down ai-down eg-down ## Undo `up` inside the cluster, keeping the kind cluster itself
 
 .PHONY: vm-delete
-vm-delete: ## Undo `vm`: restore the Docker context; stop/delete Colima only if we started/created it
+vm-delete: ## Undo `vm`: stop/delete Colima only if we started/created it
 	@if kind get clusters 2>/dev/null | grep -qvx '$(CLUSTER)'; then \
 	  printf "$(RED)other kind clusters exist, leaving Colima alone$(RESET)\n" >&2; exit 1; fi
-	@prev=$$(cat $(STATE)/docker-context 2>/dev/null); \
-	if [ "$$(docker context show 2>/dev/null)" = colima ] && [ -n "$$prev" ] && [ "$$prev" != colima ]; then docker context use "$$prev"; fi
 	@if [ -f $(STATE)/colima-created ]; then colima delete --force && rm -f $(STATE)/colima-created $(STATE)/colima-started; \
 	elif [ -f $(STATE)/colima-started ]; then colima stop && rm -f $(STATE)/colima-started; \
 	else echo "Colima was not started by us, leaving it alone"; fi
-	@rm -f $(STATE)/docker-context
 
 .PHONY: host-uninstall
 host-uninstall: ## Undo host-install: remove the vllm-metal venv (never uv, never the model cache)

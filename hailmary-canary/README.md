@@ -170,7 +170,7 @@ example `make vm CPUS=4 MEM_GB=12`, and skip the real model.
 ```bash
 make tools       # brew install colima docker kind kubectl helm uv
 make install     # git hooks and Python deps (uv sync --extra dev)
-make vm          # Colima VM, switches the docker context
+make vm          # Colima VM; your own docker context is not switched (the Makefile sets DOCKER_CONTEXT=colima for its commands)
 make up          # kind, Envoy Gateway, Agent Router, Prometheus and Grafana, then the manifests
 make forward     # LEAVE RUNNING in its own terminal: :8080 :8081 :9090 :3000
 ```
@@ -522,7 +522,7 @@ metrics.
 | Symptom | Likely cause and fix |
 | --- | --- |
 | `make: *** missing separator` | Makefile recipes must be indented with tabs, not spaces. |
-| `make vm` fails or Docker not found | Colima not running or wrong Docker context: `colima status`, `docker context use colima`. |
+| `make vm` fails or Docker not found | Colima not running: `colima status`. The Makefile pins `DOCKER_CONTEXT=colima` itself; to use the same daemon by hand, run `DOCKER_CONTEXT=colima docker ...` or `kind ...`. |
 | `make up` hangs at monitoring | First pull is slow. The timeout is 10 minutes. Check `kubectl -n monitoring get pods`. Not enough VM memory is the usual cause: raise `MEM_GB`. |
 | `connection refused` on :8080/:8081 | `make forward` is not running, or it died. Restart it. Port-forwards drop when the proxy pod restarts. |
 | Gateway never `Programmed` | The proxy Service must be ClusterIP (it is, in `10-gateway.yaml`). `kubectl describe gateway eg -n llm-test`, check the Envoy Gateway controller logs. |
@@ -688,7 +688,7 @@ was already on your machine (Docker, uv, a running Colima, your git hooks path) 
 | Target | Undoes |
 | --- | --- |
 | `make teardown` | `make up` inside the cluster (manifests, monitoring, AI gateway, Envoy Gateway and their CRDs), keeping the kind cluster. Also available piecemeal: `apply-down`, `monitoring-down`, `ai-down`, `eg-down`. |
-| `make vm-delete` | `make vm`: restores the previous Docker context, then stops Colima if we started it or deletes it if we created it. Refuses if other kind clusters exist. |
+| `make vm-delete` | `make vm`: stops Colima if we started it or deletes it if we created it. Refuses if other kind clusters exist. |
 | `make host-uninstall` | `make host-install`: removes the vllm-metal venv. Refuses while `vllm serve` is running. |
 | `make uninstall` | `make install`: restores `core.hooksPath` and removes the project `.venv`. |
 | `make tools-remove` | `make tools`: brew-uninstalls only formulae it installed, and skips any that other formulae need. |
